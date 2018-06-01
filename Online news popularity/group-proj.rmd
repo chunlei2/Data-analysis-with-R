@@ -1,0 +1,1003 @@
+---
+title: 'STAT 432 Group Project: Predicting Online News Popularity in Social Media'
+author: "Gustavo Diaz (diazdia2), Te-Yao Lee (teyaoyl2), Chunlei Liu (chunlei2), Riya Swayampati (rswaya2)"
+date: "May 9, 2018"
+abstract: "The increased of social media as a gateway to online news consumption creates the need to predict the popularity of articles before they are published. Previous work has adressed this by framing news article popularity in social media as a classification problem. While we agree with the task in principle, we propose instead that this is approached as a regression problem. We examine the performance of several parametric and non-parametric methods using data from a popular online news source. Results suggest that a random forest is the best approach at predicting the total number of article shares. However, the relatively large error metrics invite us to rethink the ways in which machine learning is being used to assist decision-making among online news content creators."
+output: 
+  html_document: 
+    theme: flatly
+    toc: true
+bibliography: group-proj.bib
+---
+
+```{r set-options, include = FALSE}
+# setting some default chunk options
+# figures will be centered
+# code will not be displayed unless `echo = TRUE` is set for a chunk
+# messages are suppressed
+# warnings are suppressed
+knitr::opts_chunk$set(fig.align = "center", echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE)
+```
+
+```{r load-packages}
+# all packages needed should be loaded in this chunk
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(randomForest)
+library(gbm)
+library(ggplot2)
+library(tibble)
+library(doParallel)
+library(parallel)
+library(MASS)
+
+options(scipen = 999) #avoid scientific notation, good for plots
+```
+
+
+# Introduction
+
+The use of social media as a gateway to information has become ubiquitous. It is fairly common for individuals to share news article on Twitter, Facebook, or similar platforms. By the same token, a decent share of content consumption originates from references made in social media. That is, the news articles we read are filtered by the people we follow or interact with in these platforms.
+
+As a consequence, content creators are increasingly becoming interested in developing tools to assist them in the selection and preparation of their material. Ideally, we would like to predict how popular a news article will be before it is published. This knowledge may be helpful to optimize multiple features of an article that may affect its popularity (e.g. format, content, references to other articles). At the same time, the continuously increasing amount of data available, both in terms of features and observations, requires an approach able to handle large amounts of information at the same time, while also being able to automatically update as more data becomes available.
+
+Within the machine learning domain, Fernandes et al [-@Fernandes2015] provide an effective solution that accomplishes both tasks. The authors develop a proactive intelligent decision support system that predicts the popularity of online news and identifies easy-to-fix attributes to improve upon it. Using data from the news source https://mashable.com, the authors approach predicting popularity as a binary classification problem, with articles being considered popular if they exhibit more than 1400 shares across different social media platforms (Facebook, Twitter, Google+, LinkedIn, Stumble-Upon, and Pinterest). Their results suggest that a random forest predicts popularity with the highest accuracy, at about 73%.
+
+While we agree with the principle of using machine learning to predict the popularity of online news articles in social media, we believe that approaching the problem as a classification task entails unnecessary loss of information. While setting cutoffs may be required inform decision making, these should not factor in model training. While 1400 shares may be a reasonable cutoff now, if overall consumption patterns change, the threshold of what must be considered popular must be reassessed to account for such a trend. 
+
+The purpose of this project is to accommodate for that shortcoming by approaching online news popularity as a regression problem, which means that we seek to predict the raw number of shares, instead of the categories established by arbitrary cutoffs. To accomplish this task, we use the [Online News Popularity Data Set](http://archive.ics.uci.edu/ml/datasets/Online+News+Popularity) from the UCI Machine Learning Repository. This is the same data set used in Fernandes et al [-@Fernandes2015] that the authors graciously contributed to the repository. This data set contains 39,644 observations, each one a different news article. The prediction target is the number of shares each article has across several social media platforms. Figure 1 shows the distribution of this variable.
+
+```{r data}
+online_news = read.csv("OnlineNewsPopularity.csv")
+
+#Remove variables that should not be used for prediction
+rm_vars = names(online_news) %in% c("url", "timedelta")
+
+online_news = online_news[!rm_vars]
+
+#order data so prediction target is first column
+online_news = online_news[c(59, 1:58)]
+
+#dim(online_news) 39644 observations (each a news article), 59 variables (58 predictors)
+
+#as.tibble(online_news) #note that all variables are by definition numeric
+
+#summary(online_news$shares) #Note the fairly skewed distribution
+
+#sum(is.na(online_news)) #No missing data
+
+# Index of inccorect records
+incorrectIDX = online_news[,"n_non_stop_unique_tokens"] > 1 | online_news[,"n_non_stop_words"]>1 | online_news[,"n_unique_tokens"] > 1
+
+online_news = online_news[!incorrectIDX,]
+new_on = online_news
+```
+
+```{r outcome_plot}
+theme_set(theme_bw())
+
+p1 = ggplot(online_news, aes(shares)) 
+
+p1 + geom_histogram(bins = 100) + scale_x_continuous(limits = c(0, 25000)) +
+  labs(x = "# Shares", y = "Count",
+      title = "Figure 1: Distribution of Article Shares",
+       caption = "Note: 569 observations omitted as they exceed x-axis range")
+```
+
+One important aspect to note from Figure 1 is that most of the distribution of article shares lies in the $[0, 5000]$ range, but many observations have values that go beyond that number. In fact, the maximum number of shares is about 843 thousand. This may imply that non-parametric methods may prove to be more useful in predicting these values, since observations with extreme values may obscure the predictions of parametric tools (e.g. outliers may influence the results of a linear regression).
+
+The data set also contains 58 predictors describing distinct features of each article. These can be classified in four categories:
+
+1. Content (e.g. number of words, links, images, videos)
+
+2. Metadata (e.g. number of keywords, data channel the article belongs to, day of the week it was published)
+
+3. References (e.g. number of references to other articles in Mashable, popularity of keywords or referenced articles)
+
+4. Topic and Subjectivity (e.g. rate of positive or negative words, sentiment analysis, number of latent topics)
+
+Table 1 shows descriptive statistics of selected predictors in the data, along with the outcome. A full data dictionary and a complete set of descriptive statistics can be found in Tables A1 and A2 in the appendix.
+
+```{r desc_tab}
+#Because too many predictors, table is only done with just a few
+#Do one with all variables in appendix, along with data dictionary
+
+varlist = with(online_news, 
+               list(shares, n_tokens_title, n_tokens_content, num_imgs,
+                    num_videos, data_channel_is_lifestyle, 
+                    data_channel_is_entertainment, data_channel_is_bus,
+                    data_channel_is_socmed, data_channel_is_tech,
+                    data_channel_is_world, 
+                    self_reference_avg_sharess, is_weekend, 
+                    global_subjectivity, global_sentiment_polarity))
+
+Mean = round(sapply(varlist, mean), 2) 
+
+SD = round(sapply(varlist, sd), 2)
+
+Minimum = round(sapply(varlist, min), 2)
+
+Maximum = round(sapply(varlist, max), 2)
+
+Variable = c("Shares", "Words in Title", "Words in Content", "Images", "Videos",
+             "Lifestyle", "Entertainment", "Business", "Social Media", "Tech",
+             "World", "Avg Shares in References", "Weekend Publication", 
+             "Subjectivity", "Sentiment Polarity")
+
+desc = data.frame(Variable, Mean, SD, Minimum, Maximum )
+
+desc_tab = kable(desc, "html", caption = "Table 1: Select Descriptive Statistics")
+
+kable_styling(desc_tab, full_width = FALSE, position = "center")
+```
+
+Figures 2-6 bivariate relationships between selected predictors and the number of shares. Additional figures are available in the appendix. 
+
+```{r words_plot}
+words_vars = c("n_tokens_title", "n_tokens_content", "n_unique_tokens", 
+               "n_non_stop_words", "n_non_stop_unique_tokens", 
+               "average_token_length")
+
+featurePlot(online_news[words_vars], online_news$shares,
+            main = "Figure 2: Bivariate Relationships with 
+            Word-number Predictors",
+            labels = c("Feature", "Shares"))
+```
+
+```{r ref_plot}
+ref_vars = c("num_hrefs", "num_self_hrefs", "num_imgs", "num_videos", 
+             "num_keywords")
+
+featurePlot(online_news[ref_vars], online_news$shares,
+            main = "Figure 3: Bivariate Relationships with Reference Predictors")
+```
+
+```{r chan_plot}
+chan_vars = c("shares", "data_channel_is_lifestyle", 
+              "data_channel_is_entertainment",
+              "data_channel_is_bus", "data_channel_is_socmed",
+              "data_channel_is_tech", "data_channel_is_world")
+
+chan_dat = online_news[chan_vars]
+
+chan_dat$channel = with(chan_dat,
+  ifelse(data_channel_is_lifestyle == 1, 
+         "Lifestyle",
+         ifelse(data_channel_is_entertainment == 1,
+                "Entertainment",
+                ifelse(data_channel_is_bus == 1,
+                       "Business",
+                       ifelse(data_channel_is_socmed == 1,
+                              "Social Media",
+                              ifelse(data_channel_is_tech == 1,
+                                     "Tech",
+                                     ifelse(data_channel_is_world == 1,
+                                            "World", NA)))))))
+
+theme_set(theme_bw())
+
+p6 = ggplot(na.omit(chan_dat), aes(shares, colour = channel))
+
+p6 + geom_density() + xlim(0, 7500) +
+  labs(x = "# Shares", y = "Density", colour = "Channel",
+      title = "Figure 4: Distribution of Article Shares by Channel",
+       caption = "Note: 2120 observations omitted as they exceed x-axis range")
+```
+
+```{r day_plot}
+day_vars = c("shares", "weekday_is_monday", "weekday_is_tuesday", 
+             "weekday_is_wednesday", "weekday_is_thursday", "weekday_is_friday",
+             "weekday_is_saturday", "weekday_is_sunday")
+
+day_dat = online_news[day_vars]
+
+day_dat$day = with(day_dat,
+  ifelse(weekday_is_monday == 1, "Monday",
+         ifelse(weekday_is_tuesday == 1, "Tuesday",
+                ifelse(weekday_is_wednesday == 1, "Wednesday",
+                       ifelse(weekday_is_thursday == 1, "Thursday",
+                              ifelse(weekday_is_friday == 1, "Friday",
+                                     ifelse(weekday_is_saturday == 1, "Saturday",
+                                            ifelse(weekday_is_sunday == 1, 
+                                                   "Sunday", NA))))))))
+
+day_dat$day = factor(day_dat$day, levels = c("Monday", "Tuesday", "Wednesday", 
+                                             "Thursday", "Friday",
+                                             "Saturday", "Sunday"))
+
+theme_set(theme_bw())
+
+p7 = ggplot(na.omit(day_dat), aes(shares, colour = day))
+
+p7 + geom_density() + xlim(0, 7500) +
+  labs(x = "# Shares", y = "Density", colour = "Day", 
+       title = "Figure 5: Distribution of Article Shares by Day of the Week",
+       caption = "Note: 3152 observations omitted as they exceed x-axis range")
+```
+
+```{r posneg_plot}
+posneg_vars = c("global_rate_positive_words", "rate_positive_words",
+                "global_rate_negative_words", "rate_negative_words")
+
+featurePlot(online_news[posneg_vars], online_news$shares,
+            main = "Figure 6: Bivariate Relationships with Word-Count
+            Subjectivity Predictors")
+```
+
+Overall, the figures reinforce the intuition that no evident relationship between predictors and the number of shares exists, so non-parametric methods are expected to perform better. The only evident trends are that articles from the channels lifestyle, social media, and Tech tend to have more shares. The same is true for articles shared over the weekend.
+
+The next section discusses the data pre-processing steps and the methods implemented. Notably, we assess the performance of the following methods:
+
+1. Multiple linear regression with stepwise model selection.
+
+2. Ridge regression
+
+3. Lasso Regression
+
+4. Elastic Net
+
+5. Random Forests
+
+6. Boosted trees
+
+We present the results in the subsequent section, and conclude with a discussion of the results.
+
+# Methods
+
+## Data
+
+Only minor changes were introduced to the data. First, one observation was removed because it presented values beyond the expected range in the variables describing the rate of non-stop words in the content (`n_non_stop_words`), rate of unique words (`n_unique_tokens`), and rate of unique non-stop words (`n_non_stop_unique_words`). Since these are rates, they are expected to be bounded by 0 and 1. One observation exceeded this range, most likely because of human error.
+
+Second, non-predictive attributes were also removed (`url`, `timedelta`) since they are used to identify observations, but do not have any concrete value in the analysis.
+
+Third, predictors that were theoretically conceived as factors (see table A1 in the appendix for reference) were coerced as such. This is done to avoid automatic scaling from packages such as `glmnet`. While this behavior makes sense for numerical predictors, scaling a variable that is conceived as a factor, but coded as numeric, may lead to an increase in prediction error.
+
+After pre-processing, the data was split into training and test sets. We maintain the split ratio in Fernandes et al [-@Fernandes2015], which leads to a distribution of 70% of the observations in training, and the remaining 30% in test.
+
+The reader is directed to the code appendix for additional details on data pre-processing and test-train splitting.
+
+```{r tsttrnsplit}
+#The original data was split 70/30
+set.seed(20180502)
+
+on_idx = createDataPartition(online_news$shares, p = 0.7, list = FALSE)
+
+on_trn_rf =  online_news[on_idx,]
+on_tst_rf =  online_news[-on_idx,]
+on_factor = c("data_channel_is_lifestyle", "data_channel_is_entertainment","data_channel_is_bus", "data_channel_is_socmed", "data_channel_is_tech", "data_channel_is_world", "weekday_is_monday", "weekday_is_tuesday", "weekday_is_wednesday", "weekday_is_thursday", "weekday_is_friday", "weekday_is_saturday", "weekday_is_sunday", "is_weekend")
+
+online_news[, on_factor] = sapply(online_news[, on_factor], as.factor)
+
+on_trn = online_news[on_idx,]
+on_tst = online_news[-on_idx,]
+```
+
+## Models
+
+
+All the models are fit considering all available predictors, without any interactions, and with the total number of article shares as the outcome. Unless otherwise specified, all models use 5-fold cross-validation.
+
+
+With this setup, we first fit a linear regression model with stepwise model selection using the following code:
+
+```{r fit_reg, echo = TRUE, eval = FALSE}
+lm_1 = lm(shares ~ ., data = on_trn)
+
+step = stepAIC(lm_1, direction="both")
+```
+
+This model is not expected to perform well given the presence of extreme values documented in the figures above. Moreover, it does not perform any resampling to reduce variance. However, it may still serve as a useful benchmark to assess the performance of other models.
+
+To address the shortcomings of conventional linear regression, we implement a series of regularization methods, the second model we fit is ridge regression using `glmnet`. This model uses the default tuning grid for the penalty term $\lambda$. 
+
+```{r fit_ridge, echo = TRUE, eval = FALSE}
+X = model.matrix(shares ~ ., data = on_trn) [, -1]
+
+y = on_trn$shares
+
+ridge_1 = cv.glmnet(X, y, alpha = 0, nfolds = 5)
+```
+
+Third, we fit a lasso regression with a similar setup:
+
+```{r fit_lasso, echo = TRUE, eval = FALSE}
+lasso_1 = cv.glmnet(X, y, alpha = 1, nfolds = 5)
+```
+
+We then generalize the mixture between ridge and lasso penalties using elastic net. We first tune the mixing parameter $\alpha$ using the `caret` pipeline. Once the best tune for $\alpha$ is found, we return to `glmnet`to explore a larger grid of potential $\lambda$ values:
+
+```{r fit_enet, echo = TRUE, eval = FALSE}
+#Overall search to tune alpha
+en_1 = train(
+  form = shares ~ .,
+  data = on_trn,
+  trControl = cv5,
+  method = "glmnet",
+  tuneLength = 10
+)
+
+#caret is not as good to tune lambda, back to glmnet
+en_1a = cv.glmnet(X, y, alpha = en_1$bestTune$alpha, nfolds = 5)
+```
+
+We also fit two non-parametric models. The first one is a random forest (`rf`) implemented in `caret` with out-of-bag error estimation, 25 possible values for the number of predictors chosen in each bootstrap resample, and a total of 1000 trees. To reduce computation time, we also allow parallel processing.
+
+```{r fit_rf, echo = TRUE, eval = FALSE}
+##Random Forest with oob
+oob = trainControl(method = "oob", allowParallel = T)
+
+cluster = makeCluster(detectCores() - 2,outfile = "LogRfTune.txt") # convention to leave 2 core for OS
+
+registerDoParallel(cluster)
+rf_oob_tune = train(
+  form = shares ~ .,
+  data = on_trn,
+  trControl = oob,
+  method = "rf",
+  tuneLength = 25,
+  ntree = 1000
+)
+stopCluster(cluster) 
+
+
+```
+
+Finally, we also use `caret` to implement a boosted tree model (`gbm`). For this model, we consider an interaction depth (i.e. number of stumps) from 1 to 3, with 500 trees in each, shrinkage parameters of .001, .01, and .1, and a minimum of 10 observations per node: 
+
+```{r fit_gbm, echo = TRUE, eval = FALSE}
+##Boosted Tree model with cv
+gbm_grid =  expand.grid(interaction.depth = 1:3,
+                        n.trees = (1:3) * 500,
+                        shrinkage = c(0.001, 0.01, 0.1),
+                        n.minobsinnode = 10)
+boost_cv = train(
+  form = shares ~ .,
+  data = on_trn,
+  trControl = cv5,
+  method = "gbm",
+  tuneGrid = gbm_grid
+)
+```
+
+We evaluate these models using both root mean-squared error and percent error. The following functions describe each metric:
+
+```{r print_metrics, echo = TRUE, eval = FALSE}
+#root mean squared error
+calc_RMSE = function(actual, predicted){
+  sqrt(mean((actual - predicted)^2))
+}
+
+#percent error
+getPercentErr = function(model, data, y, s = NA){
+  if(class(model) == "cv.glmnet"){
+    pre = predict(model, data, s)
+
+  }else{
+    pre = predict(model,data)
+  } # end of ifelse lasso and ridge
+  
+  return(mean(abs(y-pre)/abs(pre)))
+
+} # end of get getPercentErr()
+```
+
+The next section presents the results, focusing mostly in the best performing model. Additional results are available in the appendix.
+
+```{r metrics}
+# get the best tunning parameter
+getBestcaretModel = function(Caret_model){
+  Caret_model$results[as.numeric(rownames(Caret_model$bestTune)),]
+
+} # end of getBestcaretModel()
+
+# get the percent error
+
+getPercentErr = function(model, data, y, s = NA){
+  if(class(model) == "cv.glmnet"){
+    pre = predict(model, data, s)
+  }else{
+    pre = predict(model,data)
+  } # end of ifelse lasso and ridge
+  
+  return(mean(abs(y-pre)/abs(pre)))
+
+} # end of getPercentErr() # end of getPercentErr()
+
+
+# Calculate the RMSE
+calc_RMSE = function(actual, predicted){
+  sqrt(mean((actual - predicted)^2))
+}
+
+```
+
+```{r randomForest, eval= FALSE}
+
+# Randomforest model are store as a R object
+# This code chunk is for trainning the model only: do not run this code chunk
+cluster = makeCluster(detectCores() - 2,outfile = "Log.txt") # convention to leave 1 core for OS
+
+##Random Forest with oob
+oob = trainControl(method = "oob", allowParallel = T)
+set.seed(20180502)
+
+cluster = makeCluster(detectCores() - 2,outfile = "Log.txt") # convention to leave 2 core for OS
+
+registerDoParallel(cluster)
+rf_oob = train(
+  form = shares ~ .,
+  data = on_trn,
+  trControl = oob,
+  method = "rf"
+)
+stopCluster(cluster) 
+
+save(rf_oob, file = "rf_oob")
+
+
+cluster = makeCluster(detectCores() - 2,outfile = "LogRfTune.txt") # convention to leave 2 core for OS
+
+registerDoParallel(cluster)
+rf_oob_tune = train(
+  form = shares ~ .,
+  data = on_trn,
+  trControl = oob,
+  method = "rf",
+  tuneLength = 25,
+  ntree = 1000
+)
+load("rf_oob_tune")
+stopCluster(cluster) 
+# Calculate the train RMSE
+
+save(rf_oob_tune, file = "rf_oob_tune")
+# random forest with preprocessing and scale data
+
+
+oob = trainControl(method = "oob", allowParallel = T)
+set.seed(20180502)
+
+cluster = makeCluster(detectCores() - 2,outfile = "Log.txt") # convention to leave 1 core for OS
+
+registerDoParallel(cluster)
+rf_oob_scale = train(
+  form = shares ~ .,
+  data = on_trn,
+  trControl = oob,
+  method = "rf".
+  preProcess = c("center", "Scale")
+)
+stopCluster(cluster) 
+
+##Boosted Tree model with cv
+gbm_grid =  expand.grid(interaction.depth = 1:3,
+                        n.trees = (1:3) * 500,
+                        shrinkage = c(0.001, 0.01, 0.1),
+                        n.minobsinnode = 10)
+boost_cv = train(
+  form = shares ~ .,
+  data = on_trn,
+  trControl = cv5,
+  method = "gbm",
+  tuneGrid = gbm_grid
+)
+
+save(boost_cv, file = "boost_cv")
+
+##Regression
+lm_1 = lm(shares ~ ., data = on_trn)
+step = stepAIC(lm_1, direction="both",trace = FALSE)
+
+save(step,file = "step")
+
+# Elastic net
+cv5 = trainControl(method = "cv", number = 5, allowParallel = F)
+
+set.seed(20180502)
+
+en_1 = train(
+  form = shares ~ .,
+  data = on_trn,
+  trControl = cv5,
+  method = "glmnet",
+  tuneLength = 10
+)
+
+save(en_1, file = "en_1")
+
+```
+
+```{r train_models}
+##Regression
+load("step")
+
+# The train and test RMSE
+lm_1_rmse_trn = calc_RMSE(actual = on_trn$shares, predicted = predict(step, on_trn))
+
+lm_1_rmse_test = calc_RMSE(actual = on_tst$shares, predicted = predict(step, on_tst))
+
+# The train and test percent error
+lm_1_perErr_trn = getPercentErr(step,on_trn, on_trn$shares)
+
+lm_1_perErr_tst = getPercentErr(step, on_tst, on_tst$shares)
+
+##Ridge
+X = model.matrix(shares ~ ., data = on_trn) [, -1]
+X_tst = model.matrix(shares ~ ., data = on_tst)[, -1]
+y = on_trn$shares
+
+set.seed(20180502)
+
+ridge_1 = cv.glmnet(X, y, alpha = 0, nfolds = 5)
+
+# The train RMSE for two lambdas
+ridge_1_min_trn = sqrt(ridge_1$cvm[ridge_1$lambda == ridge_1$lambda.min])
+
+ridge_1_1se_trn = sqrt(ridge_1$cvm[ridge_1$lambda == ridge_1$lambda.1se])
+
+# The test RMSE for two lambdas
+ridge_1_rmse_1se_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(ridge_1, X_tst, s = "lambda.1se" ))
+
+ridge_1_rmse_min_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(ridge_1, X_tst, s = "lambda.min" )) # keep the lambda.min
+
+# The train percent error for two lambdas
+ridge_1_min_perErr_trn = getPercentErr(ridge_1, X, on_trn$shares, s = "lambda.min")
+
+ridge_1_1se_perErr_trn = getPercentErr(ridge_1, X, on_trn$shares, s = "lambda.1se")
+
+# The test percent error for two lambdas
+ridge_1_min_perErr_tst = getPercentErr(ridge_1, X_tst, on_tst$shares, s = "lambda.min")
+
+ridge_1_1se_perErr_tst = getPercentErr(ridge_1, X_tst, on_tst$shares, s = "lambda.1se")
+
+##Lasso
+set.seed(20180502)
+
+lasso_1 = cv.glmnet(X, y, alpha = 1, nfolds = 5)
+
+# The train RMSE for two lambdas
+lasso_1_min_trn = sqrt(lasso_1$cvm[lasso_1$lambda == lasso_1$lambda.min])
+
+lasso_1_1se_trn = sqrt(lasso_1$cvm[lasso_1$lambda == lasso_1$lambda.1se])
+
+# The test RMSE for two lambdas
+lasso_1_rmse_1se_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(lasso_1, X_tst, s = "lambda.1se" ))
+
+lasso_1_rmse_min_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(lasso_1, X_tst, s = "lambda.min" )) #keep the lambda.min
+
+# The train percent error for two lambdas
+lasso_1_min_perErr_trn = getPercentErr(lasso_1, X, on_trn$shares, s = "lambda.min")
+
+lasso_1_1se_perErr_trn = getPercentErr(lasso_1, X, on_trn$shares, s = "lambda.1se")
+
+# The test percent error for two lambdas
+lasso_1_min_perErr_tst = getPercentErr(lasso_1, X_tst, on_tst$shares, s = "lambda.min")
+
+lasso_1_1se_perErr_tst = getPercentErr(lasso_1, X_tst, on_tst$shares, s = "lambda.1se")
+
+##Elastic Net
+load("en_1")
+
+# Calculate the RMSE
+en_1_rmse_trn = getBestcaretModel(en_1)[, "RMSE"]
+en_1_rmse_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(en_1, on_tst))
+# Calculate the percent error
+en_1_perErr_trn = getPercentErr(model = en_1, data = on_trn, y = on_trn$shares)
+en_1_perErr_tst = getPercentErr(model = en_1, data = on_tst, y = on_tst$shares)
+
+#caret is not as good to tune lambda, back to glmnet
+set.seed(20180502)
+
+en_1a = cv.glmnet(X, y, alpha = en_1$bestTune$alpha, nfolds = 5)
+
+# The train RMSE for two lambdas
+en_1a_1se_trn = sqrt(en_1a$cvm[en_1a$lambda == en_1a$lambda.1se])
+
+en_1a_min_trn = sqrt(en_1a$cvm[en_1a$lambda == en_1a$lambda.min])
+
+# The test RMSE for two lambdas
+en_1a_rmse_1se_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(en_1a, X_tst, s = "lambda.1se" ))
+
+en_1a_rmse_min_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(en_1a, X_tst, s = "lambda.min"))
+
+# The train percent error for two lambdas
+en_1a_min_perErr_trn = getPercentErr(model = en_1a, data = X, y = on_trn$shares, s = "lambda.min")
+
+en_1a_1se_perErr_trn = getPercentErr(model = en_1a, data = X, y = on_trn$shares, s = "lambda.1se")
+
+# The test percent error for two lambdas
+en_1a_min_perErr_tst = getPercentErr(model = en_1a, data = X_tst, y = on_tst$shares, s = "lambda.min")
+en_1a_1se_perErr_tst = getPercentErr(model = en_1a, data = X_tst, y = on_tst$shares, s = "lambda.1se")
+
+
+# Download it to the working directory and run the following code
+# get the summary result of random forest
+load("rf_oob")
+
+##We had to store the RF as a separate object because it would take too long to load
+# The model is store at "https://drive.google.com/drive/folders/11lKdFAEocfAcXshqW6iQZKtxrkz4w-w5?usp=sharing"
+# Download it to the working directory and run the following code
+# get the summary result of random forest
+load("rf_oob")
+
+
+
+# get the tunned random forest
+load("rf_oob_tune")
+
+
+rf_oob_tune_rmse_trn = getBestcaretModel(rf_oob_tune)[1, 1]
+# Calculate the train percent error
+rf_oob_tune_perErr_trn = getPercentErr(rf_oob_tune,data = on_trn_rf,y = on_trn_rf$shares)
+
+# Calculate the test RMSE
+rf_oob_tune_rmse_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(rf_oob_tune, on_tst_rf))
+# Calculate the test percent error
+rf_oob_tune_perErr_tst = getPercentErr(model = rf_oob_tune, data = on_tst_rf, y = on_tst_rf$shares)
+
+# get the scale random forest
+load("rf_oob_scale")
+
+# load the bgm model
+load("boost_cv")
+
+
+# Calculate the train rmse
+boost_cv_rmse_trn = getBestcaretModel(boost_cv)[,"RMSE"]
+
+# Calculate the train percent error
+boost_cv_perErr_trn = getPercentErr(model = boost_cv, data = on_trn, y = on_trn$shares)
+
+# Calculate the test rmse
+boost_cv_rmse_tst = calc_RMSE(actual = on_tst$shares, predicted = predict(boost_cv, on_tst))
+
+# Calculate the test percent error
+boost_cv_perErr_tst = getPercentErr(model = boost_cv, data = on_tst, y = on_tst$shares)
+
+# Summary table
+ModelName = c("Mulivariate regression with stepwise selection", "Ridge with lambda.min", "Ridge with lambda.1se", "Lasso with lambda.min", "Lasso with lambda.1se", "Elastic net based on caret", "Elastic net with lambda.min based on cv.glmnet", "Elastic net with lambda.1se based on cv.glmnet","Ramdom forest based on oob", "Boosted tree based on cv")
+
+
+# vector of train RMSse
+TrainRMSE = c(lm_1_rmse_trn, ridge_1_min_trn, ridge_1_1se_trn, lasso_1_min_trn, lasso_1_1se_trn, en_1_rmse_trn, en_1a_min_trn, en_1a_1se_trn, rf_oob_tune_rmse_trn, boost_cv_rmse_trn)
+# test RMSE 
+TestRMSE = c(lm_1_rmse_test, ridge_1_rmse_min_tst, ridge_1_rmse_1se_tst, lasso_1_rmse_min_tst, lasso_1_rmse_1se_tst, en_1_rmse_tst, en_1a_rmse_min_tst, en_1a_rmse_1se_tst, rf_oob_tune_rmse_tst, boost_cv_rmse_tst)
+
+# test RMSE
+TrainPerErr = c(lm_1_perErr_trn, 
+                ridge_1_min_perErr_trn, 
+                ridge_1_1se_perErr_trn, 
+                lasso_1_min_perErr_trn, 
+                lasso_1_1se_perErr_trn,
+                en_1_perErr_trn,
+                en_1a_min_perErr_trn, 
+                en_1a_1se_perErr_trn, 
+                rf_oob_tune_perErr_trn, 
+                boost_cv_perErr_trn)
+
+# test Percent Err
+TestPerErr = c(lm_1_perErr_tst, 
+               ridge_1_min_perErr_tst, 
+               ridge_1_1se_perErr_tst, 
+               lasso_1_min_perErr_tst, 
+               lasso_1_1se_perErr_tst, 
+               en_1_perErr_tst, 
+               en_1a_min_perErr_tst, 
+               en_1a_1se_perErr_tst, 
+               rf_oob_tune_perErr_tst, 
+               boost_cv_perErr_tst)
+sum_model = data.frame(ModelName, TrainRMSE, TestRMSE, TrainPerErr, TestPerErr)
+
+# the final table
+sum_model_tab = kable_styling(kable(sum_model, format = "html",
+                                    caption = "Table 2: Model Performance"), full_width = FALSE)
+```
+
+# Results
+
+## Overall Performance
+
+Table 2 presents train and test RMSE and percent error for the models described in the previous section.
+
+```{r}
+sum_model_tab
+```
+
+Overall, the random forest model with out-of-bag error estimation has the smallest test RMSE and percent error. This is expected due to the skewed distribution described in the introduction. However, it must be noted that the RMSE is still relatively high, our best model is off by about 10,000 shares. If we keep in mind the original threshold the authors established to determine what constitutes a popular article (i.e. more than 1400 shares), then we face a scenario in which predictions are quite likely to lead incorrect decisions. For example, one may heavily promote an article that expects to be popular just to find out that it has poor reception in the audience.
+
+We propose further improvements to this regression problem in the discussion. For now, we explore the variable importance metric produced in by our random forest to understand what is driving the results.
+
+## Variable importance
+
+Figure 7 displays the variable importance in the random forest model:
+
+```{r var_imporatnce, fig.width=9, fig.height=8}
+varImpPlot(rf_oob_tune$finalModel, main = "Figure 7: Variable importance of Random Forest model")
+```
+
+If we consider the first seven variables with most importance, four of them are variables related to keywords in the metadata. Notably, those associated to the average keyword with maximum number of shares, average keywords in general, and the number of shares in the worst keyword with maximum number of shares. Since metadata values are predetermined by the editors, it is hard to interpret what they mean in terms of prediction. It seems like what influences predicted popularity the most are underlying attributes that writers are already aware of.
+
+More interestingly, the predictors that follow in variable importance are related to the reference to other articles in the website, the number of words, and the number of unique words. Understanding the direction of the effect this variables have in the number of article shares is beyond the scope of this project, but these are attributes that content creators can easily modify to enhance popularity.
+
+Surprisingly, the number of images and the rate of positive or negative words are located in the last chunk in the figure, suggesting that these do not have a lot of predicting power. In fact, subjectivity predictors do not seem to have high predictive power in the model, which defies the common sense expectation that the tone in which news are presented matters for consumption.
+
+# Discussion
+
+From the results above we can see that, according to our evaluation metrics (test percent error and test RMSE), the random forest model gives the best result.
+
+This result is relatively better compared to all the other models, but is still not as accurate in the bigger picture due to high test percent error and RMSE. This might be because of skewed models or, most likely, due to the presence of multiple influential outliers in the data. One may be tempted to conclude that the classification might be preferable since it achieves higher accuracy, but the performance of the models presented here highlights the complications of setting arbitrary thresholds. In particular, we may lead to believe that prediction accuracy is high because of a few outlier cases that are easy to predict drive the results.
+
+For future analysis, we might get a better result if we transform the response variable or use a subset of the data that does not include outliers for model fitting of normal observations as compared to fitting the entire data set, this may be of interest if we accept that predicting popularity is only relevant for decision-making at the margins. Another possible method would be to use robust regression to detect and accommodate for influential observations which, in theory, could make our model more accurate. More generally, it may be fruitful to think about predicting popularity by leveraging the advantages of both regression and classification.
+
+# References
+
+<div id="refs"></div>
+
+# Appendix
+
+## Tables and Figures
+
+```{r dictionary}
+Feature = names(online_news)
+
+Description = c(
+  "Number of Shares (Prediction Target)",
+  "Number of words in title",
+  "Number of words in content",
+  "Rate of unique Words in content",
+  "Rate of non-stop words in content",
+  "Rate of unique non-stop words in content",
+  "Number of links",
+  "Number of links to other articles in Mashable",
+  "Number of images",
+  "Number of videos",
+  "Average length of words in content",
+  "Number of keywords in metadata",
+  "Data channel 'Lifestyle'",
+  "Data channel 'Entertainment'",
+  "Data channel 'Business'",
+  "Data channel 'Social Media'",
+  "Data channel 'Tech'",
+  "Data channel 'World'",
+  "Worst keyword (min. shares)",
+  "Worst keyword (max. shares)",
+  "Worst keyword (avg. shares)",
+  "Best keyword (min. shares)",
+  "Best keyword (max. shares)",
+  "Best keyword (avg. shares)",
+  "Average keyword (min. shares)",
+  "Average keyword (max. shares)",
+  "Average keyword (avg. shares)",
+  "Minimum shares of referenced Mashable articles",
+  "Maximum shares of referenced Mashable articles",
+  "Average shares of referenced Mashable articles",
+  "Published on Monday",
+  "Published on Tuesday",
+  "Published on Wednesday",
+  "Published on Thursday",
+  "Published on Friday",
+  "Published on Saturday",
+  "Published on Sunday",
+  "Published during weekend",
+  "Closeness to LDA topic 0",
+  "Closeness to LDA topic 1",
+  "Closeness to LDA topic 2",
+  "Closeness to LDA topic 3",
+  "Closeness to LDA topic 4",
+  "Text subjectivity",
+  "Text sentiment polarity",
+  "Rate of positive words",
+  "Rate of negative words",
+  "Rate of positive words among non-neutral tokens",
+  "Rate of negative words among non-neutral tokens",
+  "Avg. polarity of positive words",
+  "Min. polarity of positive words",
+  "Max. polarity of positive words",
+  "Avg. polarity of negative words",
+  "Min. polarity of negative words",
+  "Max. polarity of negative words",
+  "Title subjectivity",
+  "Title polarity",
+  "Absolute subjectivity level",
+  "Absolute polarity level"
+)
+
+Type = c(
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Factor",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric",
+  "Numeric"
+)
+
+dict = data.frame(Feature, Description, Type)
+
+dict_tab = kable(dict, "html", caption = "Table A1: Data Dictionary")
+
+kable_styling(dict_tab, full_width = FALSE, position = "center")
+```
+
+```{r desc_tab_long}
+vars_long = as.list(new_on)
+
+means = round(sapply(vars_long, mean), 2)
+
+sds = round(sapply(vars_long, sd), 2)
+
+mins = round(sapply(vars_long, min), 2)
+
+maxs = round(sapply(vars_long, max), 2)
+
+desc_long = data.frame(Feature, means, sds, mins, maxs)
+
+rownames(desc_long) = NULL
+colnames(desc_long) = c("Feature", "Mean", "SD", "Minimum", "Maximum")
+
+desc_long_tab = kable(desc_long, "html", caption = "Table A2: Descriptive Statistics")
+
+kable_styling(desc_long_tab, full_width = FALSE, position = "center")
+```
+
+```{r self_plot}
+self_vars = c("self_reference_min_shares", "self_reference_avg_sharess", 
+              "self_reference_max_shares")
+
+featurePlot(online_news[self_vars], online_news$shares,
+            main = "Figure A1: Bivariate Relationships with Self-Reference 
+            Predictors")
+```
+
+
+```{r key_plot}
+key_vars = c("kw_min_min", "kw_max_min", "kw_avg_min",
+             "kw_min_avg", "kw_max_avg", "kw_avg_avg",
+             "kw_min_max", "kw_max_max", "kw_avg_max")
+
+featurePlot(online_news[key_vars], online_news$shares,
+            main = "Figure A2: Bivariate Relationships with Keyword Predictors",
+            layout = c(3, 3))
+
+```
+
+```{r topic_plot}
+topic_vars = c("LDA_00", "LDA_01", "LDA_02", "LDA_03", "LDA_04")
+
+#Note that here LDA stands for Latent Dirichlet Allocation
+
+featurePlot(online_news[topic_vars], online_news$shares, 
+            main = "Figure A3: Bivariate Relationships with 
+            Latent Topic Predictors")
+```
+
+```{r subj_plot}
+subj_vars = c("global_subjectivity", "title_subjectivity", 
+              "abs_title_subjectivity", "global_sentiment_polarity", 
+              "title_sentiment_polarity", "abs_title_sentiment_polarity")
+
+featurePlot(online_news[subj_vars], online_news$shares,
+            main = "Figure A4: Bivariate Relationships with General 
+            Subjectivity Predictors")
+```
+
+```{r polar_plot}
+polar_vars = c("min_negative_polarity", "avg_negative_polarity",
+               "max_negative_polarity", "min_positive_polarity",
+               "avg_positive_polarity", "max_positive_polarity")
+
+featurePlot(online_news[polar_vars], online_news$shares,
+            main = "Figure A5: Bivariate Relationships with World Polarity
+            Predictors")
+
+```
+
+```{r plot_ridge}
+plot(ridge_1, sub = "Figure A6: Ridge Results")
+```
+
+```{r plot_lasso}
+plot(lasso_1, sub = "Figure A7: Lasso Results")
+```
+
+```{r plot_en1}
+plot(en_1, main = "Figure A8: Elastic Net Overall Result")
+```
+
+```{r plot_en1a}
+plot(en_1a, sub = "Figure A9: Tuning penalty term in Elastic Net")
+```
+
+## Code
+
+Because many of the model objects took a long time to load, we stored them as separate files, including this in the final submission would take too much space. These are available upon request.
+
+```{r appendix, echo = TRUE, eval = FALSE}
+##SETUP
+<<load-packages>>
+  
+##DATA PREPROCESSING
+<<data>>
+  
+##EDA
+<<desc_tab>>
+
+<<words_plot>>
+  
+<<ref_plot>>
+  
+<<chan_plot>>
+  
+<<day_plot>>
+  
+<<posneg_plot>>
+  
+##TEST-TRAIN SPLIT
+<<tsttrnsplit>>
+  
+##EVALUATION METRICS
+<<metrics>>
+  
+##FIT MODELS
+<<randomForest>>
+  
+<<train_models>>
+```
+
+  
+
