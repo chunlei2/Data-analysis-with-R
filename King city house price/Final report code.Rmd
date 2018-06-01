@@ -1,0 +1,372 @@
+---
+title: 'What determines the house price in King city'
+author: "Chunlei Liu"
+date: 'chunlei2'
+abstract: 'This is an analysis of the house price in King city. Based on this analysis, people can predict the house price with the features of this house. K nearest neighbors algorithm, Lasso, Ridge and Elastic net models, three linear penalty regression models are used. The best prediction model, scaled KNN model was picked up with the lowest test RMSE. A table contained all the test RMSE is achieved. Finally, I explain the results. The tuning parameter for KNN model is k=10. The real life explaination of the coefficients of the Lasso model is made.'
+output: 
+  html_document: 
+    theme: simplex
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+library(corrplot)
+library(caret)
+library(glmnet)
+library(kableExtra)
+library(knitr)
+kingcity_house <- read.csv("https://daviddalpiaz.github.io/stat432sp18/projects/kc_house_data.csv")
+
+```
+
+# Introduction
+## Backgroud
+King County is a county located in the U.S. state of Washington.King is the most populous county in Washington, and the 13th-most populous in the United States. This dataset contains house sale prices for King County, which includes Seattle. It includes homes sold between May 2014 and May 2015. The data set includes house sale prices and a lot of features of houses.
+
+## Motivation
+House price is always the most important part when buying a house. Unbalance always exists between your expected prices and features of houses. So based on the data provided, our goal is to predict the house price eventually. Future house consumers can get a predicted house price given the features they wanted. This can be a great reference when buying a house. 
+
+## EDA
+Five variables id, date, zipcode, latitude and longtitude  are not features I care about when predicting the house price. So I drop five variables first. Then I make a correlation table with the rest varibales.
+```{r include=FALSE}
+drop <- c("id", "date", "zipcode", "lat", "long")
+kingcity_house <- kingcity_house[, !names(kingcity_house) %in% drop]
+```
+
+### Correlation plot
+```{r echo=FALSE}
+corrplot(cor(kingcity_house))
+```
+
+Based on the correlation table above, variables bathrooms, sqft_living, grade, sqft_above, sqft_living15 are highly correlated with the price. Variables bedrooms, floors, waterfront, view, sqft_basement are less correlated with the price. The rest are almost not correlated with the price.
+
+### Scatter plot
+For choosing variables from those correlated variables, the scatter plot were used.
+```{r echo=FALSE}
+kingcity_house_highcor <- kingcity_house[,c("price","bathrooms", "sqft_living", "grade", "sqft_above", "sqft_living15")]
+kingcity_house_medcor <- kingcity_house[,c("price","bedrooms", "floors", "waterfront", "view", "sqft_basement")]
+#scatter plot for high correlated variables
+pairs(kingcity_house_highcor)
+#scatter plot for less correlated variables
+pairs(kingcity_house_medcor)
+```
+
+From the two scatter plots, apparent linear relationships exist between the price and high correlated variables, but no apparent linear relationships exist between the price and less correlated variables except sqft_basement. So the linear model may be suitable for the prediction. Also there is an obvious outlier exists, it has more than 30 bedrooms, while it has a very low price.
+
+# Method
+## Data
+I exclude the outlier first. And I replace two variables sqft_living15 and sqft_lot15. The original meaning is Living room area in 2015(implies-- some renovations).This might or might not have affected the lotsize area. LotSize area in 2015(implies-- some renovations). The new meaning is the volume of the living room area changing from the past to 2015 and the volume of the lot area changing from the past to 2015. I think this is more related to the house price.Then I check the missing values, the result shows the data set has no missing value.
+```{r include=FALSE}
+king_out <- which(kingcity_house$bedrooms > 30)
+kingcity_house <- kingcity_house[-king_out,]
+kingcity_house$sqft_living15 <- (kingcity_house$sqft_living15 - kingcity_house$sqft_living)
+kingcity_house$sqft_lot15 <- (kingcity_house$sqft_lot15 - kingcity_house$sqft_lot)
+sum(is.na(kingcity_house))
+```
+
+
+```{r include=FALSE}
+#Remove Highly correlated predictors
+kingcity_house_cor <- cor(kingcity_house[,-1])
+highlyCorVar <- findCorrelation(kingcity_house_cor, cutoff = .8)
+kingcity_house_var <- kingcity_house[,-(highlyCorVar+1)]
+#Remove Linear dependable predictors
+LinearCombos <- findLinearCombos(kingcity_house_var[,-1])
+LinearCombos
+```
+After I picked up variables, first, I identify the variables highly correlated, set 0.8 as the cutoff. The variable sqft_living was deleted. Its Correlation coefficient with sqft_above is 0.8766. Second, I identify the predictors which have linear dependency. For data without sqft_living variable, there is no linear dependency existing. For preprocess of the data, I plan to compare data scaled and centerd with original data. And the log transformation will be included.They will be included in the train model.
+
+The waterfront variable was numeric, I set it to be the factor now.
+```{r include=FALSE}
+kingcity_house_var$waterfront <- as.factor(kingcity_house_var$waterfront)
+```
+
+## Model
+I consider using KNN model with different tuning parameters, choosing one performing best, comparing data sclaed and not scaled. And linear penalty regression is used including Ridge ，Lasso and Elastic net model. And from the scatter plot, exponential relationship might exist, like grade with price. So log transformation will be applied to the three model. Results will be compared between transformation and no transformation. RMSE will be the criteria to compare different models. First, train and test split the data. Second making two functions to get the RMSE and the best model. Third training the model with the crossvalidation and the tuning parameter. The test RMSE is achieved for each model. 
+
+### KNN model
+```{r include=FALSE}
+# Data spliting
+set.seed(23)
+king_idx <- createDataPartition(kingcity_house_var$price, p = 0.7, list = F)
+king_trn <- kingcity_house_var[king_idx ,]
+king_tst <- kingcity_house_var[-king_idx ,]
+cv_5 = trainControl(method = "cv", number = 5)
+# Function for calculating RMSE
+calc_rmse <- function(actual, predicted) {
+  sqrt(mean((actual-predicted)^2))
+}
+# Function for getting the best tuning parameter
+get_best_result = function(caret_fit) {
+  best = which(rownames(caret_fit$results) == rownames(caret_fit$bestTune))
+  best_result = caret_fit$results[best, ]
+  rownames(best_result) = NULL
+  best_result
+}
+
+```
+```{r echo=TRUE}
+# KNN Model training without preprocess
+set.seed(23)
+king_knn_mod_1 <- train(
+  price ~ .,
+  data = king_trn,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = expand.grid(k = seq(from = 5, to = 100 , by = 5))
+)
+king_knn_mod_1_tstRMSE <- calc_rmse(actual = king_tst$price, predicted = predict(king_knn_mod_1, newdata = king_tst))
+
+# KNN Model training with preprocess
+set.seed(23)
+king_knn_mod_2 <- train(
+  price ~ .,
+  data = king_trn,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = expand.grid(k = seq(from = 5, to = 100 , by = 5)),
+  preProcess = c("center", "scale")
+)
+king_knn_mod_2_tstRMSE <- calc_rmse(actual = king_tst$price, predicted = predict(king_knn_mod_2, newdata = king_tst))
+```
+
+
+### Lasso Model
+```{r}
+#Lasso model with log transformation
+kingcity_Lasso_trn_1 <- king_trn
+kingcity_Lasso_trn_1$price <- log(kingcity_Lasso_trn_1$price)
+x_1 = model.matrix(price ~ ., kingcity_Lasso_trn_1)[, -1]
+y_1 = kingcity_Lasso_trn_1$price
+lm_lasso_1 = cv.glmnet(x_1, y_1, alpha = 1)
+Lasso_grid_1 = expand.grid(alpha = 1, lambda = c(lm_lasso_1$lambda.min, lm_lasso_1$lambda.1se))
+set.seed(23)
+fit_Lasso_1 <- train(
+  price ~ .,
+  data = kingcity_Lasso_trn_1,
+  method = "glmnet",
+  trControl = cv_5,
+  tuneGrid = Lasso_grid_1
+)
+
+king_Lasso_log_tstRMSE <- calc_rmse(actual = king_tst$price, predicted = exp(predict(fit_Lasso_1, newdata = king_tst)))
+#Lasso model without log transformation
+kingcity_Lasso_trn_2 <- king_trn
+x_2 = model.matrix(price ~ ., kingcity_Lasso_trn_2)[, -1]
+y_2 = kingcity_Lasso_trn_2$price
+lm_lasso_2 = cv.glmnet(x_2, y_2, alpha = 1)
+Lasso_grid_2 = expand.grid(alpha = 1, lambda = c(lm_lasso_2$lambda.min, lm_lasso_2$lambda.1se))
+set.seed(23)
+fit_Lasso_2 <- train(
+  price ~ .,
+  data = kingcity_Lasso_trn_2,
+  method = "glmnet",
+  trControl = cv_5,
+  tuneGrid = Lasso_grid_2
+  
+)
+king_Lasso_nolog_tstRMSE <- calc_rmse(actual = king_tst$price, predicted = predict(fit_Lasso_2, newdata = king_tst))
+```
+
+### Ridge Model
+```{r}
+
+#Ridge model with log transformation
+kingcity_Ridge_trn_1 <- king_trn
+kingcity_Ridge_trn_1$price <- log(kingcity_Ridge_trn_1$price)
+x_3 = model.matrix(price ~ ., kingcity_Ridge_trn_1)[, -1]
+y_3 = kingcity_Ridge_trn_1$price
+lm_ridge_1 = cv.glmnet(x_3, y_3, alpha = 0)
+Ridge_grid_1 = expand.grid(alpha = 0, lambda = c(lm_ridge_1$lambda.min, lm_ridge_1$lambda.1se))
+set.seed(23)
+fit_Ridge_1 <- train(
+  price ~ .,
+  data = kingcity_Ridge_trn_1,
+  method = "glmnet",
+  trControl = cv_5,
+  tuneGrid = Ridge_grid_1
+)
+
+king_Ridge_log_tstRMSE <- calc_rmse(actual = king_tst$price, predicted = exp(predict(fit_Ridge_1, newdata = king_tst)))
+#Ridge model without log transformation
+kingcity_Ridge_trn_2 <- king_trn
+x_4 = model.matrix(price ~ ., kingcity_Ridge_trn_2)[, -1]
+y_4 = kingcity_Ridge_trn_2$price
+lm_ridge_2 = cv.glmnet(x_4, y_4, alpha = 0)
+Ridge_grid_2 = expand.grid(alpha = 0, lambda = c(lm_ridge_2$lambda.min, lm_ridge_2$lambda.1se))
+set.seed(23)
+fit_Ridge_2 <- train(
+  price ~ .,
+  data = kingcity_Ridge_trn_2,
+  method = "glmnet",
+  trControl = cv_5,
+  tuneGrid = Ridge_grid_2
+  
+)
+king_Ridge_nolog_tstRMSE <- calc_rmse(actual = king_tst$price, predicted = predict(fit_Ridge_2, newdata = king_tst))
+```
+
+### Elastic net Model
+```{r}
+#Elastic net model without log transformation
+kingcity_elnet_trn <- king_trn
+fit_elnet <- train(
+  price ~ .,
+  data = kingcity_elnet_trn,
+  trControl = cv_5,
+  method = "glmnet",
+  tuneLength = 10
+)
+king_elnet_nolog_tstRMSE <- calc_rmse(actual = king_tst$price, predicted = predict(fit_elnet, newdata = king_tst))
+
+
+#Elastic net model with log transformation
+kingcity_elnet_trn_log <- king_trn
+kingcity_elnet_trn_log$price <- log(kingcity_elnet_trn$price)
+fit_elnet_log <- train(
+  price ~ .,
+  data = kingcity_elnet_trn_log,
+  trControl = cv_5,
+  method = "glmnet",
+  tuneLength = 10
+)
+king_elnet_log_tstRMSE <- calc_rmse(actual = king_tst$price, predicted = exp(predict(fit_elnet_log, newdata = king_tst)))
+```
+
+# Results
+## Model summary
+```{r echo=FALSE}
+RMSE <- c(king_knn_mod_1_tstRMSE,king_knn_mod_2_tstRMSE,king_Lasso_log_tstRMSE,king_Lasso_nolog_tstRMSE,king_Ridge_log_tstRMSE,king_Ridge_nolog_tstRMSE,king_elnet_nolog_tstRMSE,king_elnet_log_tstRMSE)
+mod <- c("Not Scaled KNN Model", "Scaled KNN Model", "Log Lasso Model", "NoLog Lasso Model", "Log Ridge Model", "NoLog Ridge Model","NoLog Elastic net Model", "Log Elastic net Model")
+result <- data.frame(mod,RMSE)
+colnames(result) <- c("Model Name","RMSE")
+kable_styling(kable(result, format = "html"), full_width = F)
+get_best_result(king_knn_mod_2)
+```
+Totally, I tried three different models, and some have the preprocess, some don't have. RMSE is the criteria for comparison. The best of six models is scaled KNN Model. And the best tune parameter k=10. It has the lowest test RMSE 205376.2. And the results also show that scaling is helpful fot the KNN model. But the log transformation doesn't help, instead the test RMSE becomes higher. A table for the test RMSE is made.
+
+#Discussion
+Above, I choose scaled KNN model as the best model as it has the lowest RMSE. Lowest RMSE means that it has the highest prediction accuracy. And k=10 means the algorithm uses 10 nearest neighbors.But KNN model is just for prediction. If I want to know the relationship between predictors and responses, I will consider lasso and elastic net model，as their RMSE is similar and smaller than Ridge.For lasso and Elastic net models without log transformation, the test RMSE is similar. Lasso model is easier than elastic net model, so I will choose Lasso model.
+```{r echo=FALSE}
+Lasso_grid_2
+get_best_result(fit_Lasso_2)
+coef(lm_lasso_2,s = "lambda.min")
+```
+For the Lasso Model, use the user defined function get_best_result to get the best tuning parameter lambda.min. Get the coefficient of the lasso model with the minmum lambda. The coefficient of the lasso model is when other variables are fixed, if the predictors increase one unit, what is the expected value of the price will change. Most of the coefficients make sense like bathrooms,floors,waterfront1, view, condition, grade, sqft_above,sqft_basement, yr_renovated,sqft_lving15, the expected price increases when the variables increase. People want more bathrooms, floors, waterfront house, more views to this house, better condition and grade, more sqft_above and sqft_basement, house renovated, more sqft_living. Some of the coefficients look a bit weird like bedrooms, sqft_lot, yr_built, sqft_lot5. When the number of bedrooms increase, the expected price decreases. Maybe people don't like too many bedrooms. Too many bedrooms will make each bedroom smaller if the area is limited. The same as sqft_lot and sqft_lot15, negative relationships exist. People don't like large lot area and the increment of the lot area. For yr_built, newly built house tend to have lower price, the reason for this might be other features are more important than year built, or there are some features not included in the data set.
+So in conclusion, if people run after the most accurate house price prediction, the KNN model is recommended. If people want to know the relationship between house price and features of the house. Lasso model without log transformation should be applied.
+
+# Appendix
+## Data dictionary
+id:a notation for a house（num)
+
+date:Date house was sold（str)
+
+price:Price is prediction target(num)
+
+bedrooms:Number of Bedrooms/House(num)
+
+bathrooms:Number of bathrooms/bedrooms(num)
+
+sqft_living:square footage of the home(num)
+
+sqft_lot:square footage of the lot(num)
+
+floors:Total floors (levels) in house(num)
+
+waterfront:House which has a view to a waterfront(num)
+
+view:Has been viewed(num)
+
+condition:How good the condition is ( Overall )(num)
+
+grade: overall grade given to the housing unit,
+based on King County grading system(num)
+
+sqft_above:square footage of house apart from basement(num)
+
+sqft_basement:square footage of the basement(num)
+
+yr_built:Built Year(num)
+
+yr_renovated:Year when house was renovated(num)
+
+zipcode:zip(num)
+
+lat:Latitude coordinate(num)
+
+long:Longitude coordinate(num)
+
+sqft_living15:the increment of square footage of the home from past to 2015(num)
+
+sqft_lot15: the increment of square footage of the lot(num)
+
+## Descriptive statistics
+Descriptive statistics for each variable, histogram for price, the target of the prediction.
+```{r echo=TRUE}
+nrow(kingcity_house)
+summary(kingcity_house)
+hist(kingcity_house$price, col = "blue")
+```
+
+## Previous codes
+Here is the code omited in the previous parts.
+```{r eval=FALSE}
+library(corrplot)
+library(caret)
+library(glmnet)
+library(kableExtra)
+library(knitr)
+kingcity_house <- read.csv("https://daviddalpiaz.github.io/stat432sp18/projects/kc_house_data.csv")
+
+drop <- c("id", "date", "zipcode", "lat", "long")
+kingcity_house <- kingcity_house[, !names(kingcity_house) %in% drop]
+
+
+king_out <- which(kingcity_house$bedrooms > 30)
+kingcity_house <- kingcity_house[-king_out,]
+kingcity_house$sqft_living15 <- (kingcity_house$sqft_living15 - kingcity_house$sqft_living)
+kingcity_house$sqft_lot15 <- (kingcity_house$sqft_lot15 - kingcity_house$sqft_lot)
+sum(is.na(kingcity_house))
+
+kingcity_house_cor <- cor(kingcity_house[,-1])
+highlyCorVar <- findCorrelation(kingcity_house_cor, cutoff = .8)
+kingcity_house_var <- kingcity_house[,-(highlyCorVar+1)]
+#Remove Linear dependable predictors
+LinearCombos <- findLinearCombos(kingcity_house_var[,-1])
+LinearCombos
+
+kingcity_house_var$waterfront <- as.factor(kingcity_house_var$waterfront)
+
+# Data spliting
+set.seed(23)
+king_idx <- createDataPartition(kingcity_house_var$price, p = 0.7, list = F)
+king_trn <- kingcity_house_var[king_idx ,]
+king_tst <- kingcity_house_var[-king_idx ,]
+# Function for calculating RMSE
+calc_rmse <- function(actual, predicted) {
+  sqrt(mean((actual-predicted)^2))
+}
+# Function for getting the best tuning parameter
+get_best_result = function(caret_fit) {
+  best = which(rownames(caret_fit$results) == rownames(caret_fit$bestTune))
+  best_result = caret_fit$results[best, ]
+  rownames(best_result) = NULL
+  best_result
+}
+
+cv_5 = trainControl(method = "cv", number = 5)
+
+RMSE <- c(king_knn_mod_1_tstRMSE,king_knn_mod_2_tstRMSE,king_Lasso_log_tstRMSE,king_Lasso_nolog_tstRMSE,king_Ridge_log_tstRMSE,king_Ridge_nolog_tstRMSE,king_elnet_nolog_tstRMSE,king_elnet_log_tstRMSE)
+mod <- c("Not Scaled KNN Model", "Scaled KNN Model", "Log Lasso Model", "NoLog Lasso Model", "Log Ridge Model", "NoLog Ridge Model","NoLog Elastic net Model", "Log Elastic net Model")
+result <- data.frame(mod,RMSE)
+colnames(result) <- c("Model Name","RMSE")
+kable_styling(kable(result, format = "html"), full_width = F)
+get_best_result(king_knn_mod_2)
+
+Lasso_grid_2
+get_best_result(fit_Lasso_2)
+coef(lm_lasso_2,s = "lambda.min")
+```
+
